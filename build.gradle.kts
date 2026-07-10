@@ -17,6 +17,7 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-jdbc:0.41.1")
     implementation("org.jetbrains.exposed:exposed-java-time:0.41.1")
     implementation("org.xerial:sqlite-jdbc:3.42.0.0")
+    implementation("org.knowm.xchart:xchart:3.8.4")
     implementation("org.slf4j:slf4j-simple:1.7.36")
 }
 

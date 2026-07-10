@@ -1,176 +1,178 @@
 package com.statbot.bot
 
 import com.github.kotlintelegrambot.bot
+import com.github.kotlintelegrambot.Bot
 import com.github.kotlintelegrambot.dispatch
-import com.github.kotlintelegrambot.dispatcher.callbackQuery
 import com.github.kotlintelegrambot.dispatcher.command
+import com.github.kotlintelegrambot.dispatcher.text
+import com.github.kotlintelegrambot.dispatcher.callbackQuery
 import com.github.kotlintelegrambot.entities.ChatId
 import com.github.kotlintelegrambot.entities.InlineKeyboardMarkup
 import com.github.kotlintelegrambot.entities.keyboard.InlineKeyboardButton
-import com.statbot.db.Answers
-import com.statbot.db.Questions
-import com.statbot.db.Users
+import com.github.kotlintelegrambot.entities.KeyboardReplyMarkup
+import com.github.kotlintelegrambot.entities.keyboard.KeyboardButton
+import com.github.kotlintelegrambot.entities.TelegramFile
+import com.github.kotlintelegrambot.entities.ParseMode
+import com.github.kotlintelegrambot.entities.Message
 import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.sql.javatime.*
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.knowm.xchart.BitmapEncoder
+import org.knowm.xchart.CategoryChartBuilder
+import java.io.File
+import java.time.Duration
+import java.time.LocalDate
 import java.time.LocalDateTime
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Properties
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
-val BOT_TOKEN = System.getenv("BOT_TOKEN") ?: error("Переменная окружения BOT_TOKEN не задана!")
-const val TEACHER_PASSWORD = "SuperStat2026"
+// =========================================================================
+//                       БАЗА ДАННЫХ И ТАБЛИЦЫ
+// =========================================================================
+
+object Users : Table() {
+    val tgId = long("tg_id")
+    val role = varchar("role", 20).default("STUDENT")
+    override val primaryKey = PrimaryKey(tgId)
+}
+
+object Questions : Table() {
+    val id = integer("id").autoIncrement()
+    val text = text("text")
+    val isActive = bool("is_active").default(true)
+    val sortOrder = integer("sort_order").default(0)
+    override val primaryKey = PrimaryKey(id)
+}
+
+object Answers : Table() {
+    val id = integer("id").autoIncrement()
+    val userTgId = long("user_tg_id")
+    val questionId = integer("question_id").references(Questions.id)
+    val score = integer("score")
+    val createdAt = datetime("created_at").clientDefault { LocalDateTime.now() }
+    override val primaryKey = PrimaryKey(id)
+}
+
+// =========================================================================
+//                       УПРАВЛЕНИЕ СОСТОЯНИЕМ
+// =========================================================================
+
+data class SurveyState(val pendingQuestionIds: List<Int>)
+
+object SessionManager {
+    val activeSurveys = mutableMapOf<Long, SurveyState>()
+}
+
+// =========================================================================
+//                       ТОЧКА ВХОДА (MAIN)
+// =========================================================================
 
 fun main() {
-    // 1. Инициализация локальной базы данных SQLite
     Database.connect("jdbc:sqlite:statbot.db", driver = "org.sqlite.JDBC")
     transaction {
         SchemaUtils.create(Users, Questions, Answers)
-
-        // Если таблица вопросов пустая, заполняем её стартовыми вопросами
         if (Questions.selectAll().count() == 0L) {
-            // Явное указание колонок для исключения ошибок типа Unresolved reference 'text'
-            Questions.insert { it[Questions.text] = "Как прошел созвон?"; it[Questions.sortOrder] = 1 }
-            Questions.insert { it[Questions.text] = "Насколько понятна задача?"; it[Questions.sortOrder] = 2 }
-            Questions.insert { it[Questions.text] = "Успеваешь по дедлайнам?"; it[Questions.sortOrder] = 3 }
+            Questions.insert { it[text] = "Оцени уровень энергии сегодня"; it[sortOrder] = 1 }
+            Questions.insert { it[text] = "Оцени уровень мотивации"; it[sortOrder] = 2 }
+            Questions.insert { it[text] = "Оцени уровень стресса (10 - нет стресса, 1 - сильный стресс)"; it[sortOrder] = 3 }
         }
     }
 
-    // 2. Настройка бота
-    val statBot = bot {
-        token = BOT_TOKEN
-        dispatch {
+    val botToken = System.getenv("BOT_TOKEN") ?: Properties().apply {
+        val propertiesFile = File("local.properties")
+        if (propertiesFile.exists()) {
+            propertiesFile.inputStream().use { load(it) }
+        }
+    }.getProperty("BOT_TOKEN") ?: error("Критическая ошибка: Токен не найден!")
 
+    val statBot = bot {
+        token = botToken
+        dispatch {
             command("start") {
                 val tgId = message.from?.id ?: return@command
                 val chatIdWrapper = ChatId.fromId(message.chat.id)
 
+                val userRole = transaction<String> {
+                    val userRow = Users.select { Users.tgId eq tgId }.singleOrNull()
+                    if (userRow == null) {
+                        Users.insert { it[Users.tgId] = tgId; it[Users.role] = "STUDENT" }
+                        "STUDENT"
+                    } else {
+                        userRow[Users.role]
+                    }
+                }
+
+                val menuKeyboard = if (userRole == "TEACHER") getTeacherKeyboard() else getStudentKeyboard()
+                bot.sendMessage(chatId = chatIdWrapper, text = "Привет! Я бот для сбора статистики.", replyMarkup = menuKeyboard)
+            }
+
+            command("iamteacher") {
+                val tgId = message.from?.id ?: return@command
+                val chatIdWrapper = ChatId.fromId(message.chat.id)
+                val args = message.text?.split(" ") ?: return@command
+
+                if (args.size < 2 || args[1] != "SuperStat2026") {
+                    bot.sendMessage(chatIdWrapper, text = "❌ Неверный пароль.")
+                    return@command
+                }
+
                 transaction {
                     val userExists = Users.select { Users.tgId eq tgId }.count() > 0
-                    if (!userExists) {
-                        Users.insert {
-                            it[Users.tgId] = tgId
-                            it[Users.role] = "STUDENT"
-                        }
+                    if (userExists) {
+                        Users.update({ Users.tgId eq tgId }) { it[role] = "TEACHER" }
+                    } else {
+                        Users.insert { it[Users.tgId] = tgId; it[role] = "TEACHER" }
                     }
                 }
-
-                bot.sendMessage(
-                    chatId = chatIdWrapper,
-                    text = "Привет! Я бот для сбора статистики. Опросы будут приходить по расписанию."
-                )
+                bot.sendMessage(chatIdWrapper, text = "✅ Пароль верный!", replyMarkup = getTeacherKeyboard())
             }
 
-            // Обработка секретной команды для преподавателя
-            command("iamteacher") {
-                val args = message.text?.split(" ") ?: return@command
-                val tgId = message.from?.id ?: return@command
-                val chatIdWrapper = ChatId.fromId(message.chat.id)
+            command("test") { handleStartSurvey(bot, message) }
+            text("📝 Пройти опрос") { handleStartSurvey(bot, message) }
 
-                if (args.size == 2 && args[1] == TEACHER_PASSWORD) {
-                    // Обновляем роль пользователя до TEACHER
-                    transaction {
-                        Users.update({ Users.tgId eq tgId }) {
-                            it[Users.role] = "TEACHER"
-                        }
-                    }
+            command("stats") { handleShowStats(bot, message) }
+            text("📊 Статистика за сегодня") { handleShowStats(bot, message) }
 
-                    // Используем безопасный ChatId.fromId()
-                    bot.deleteMessage(chatIdWrapper, message.messageId)
-                    bot.sendMessage(chatIdWrapper, text = "✅ Права преподавателя получены. Вам доступна статистика.")
-                } else {
-                    bot.sendMessage(chatIdWrapper, text = "❌ Неверный пароль.")
-                }
-            }
+            command("weekly") { handleShowWeeklyChart(bot, message) }
+            text("📈 График за неделю") { handleShowWeeklyChart(bot, message) }
 
-            // Тестовая команда для ручного запуска опроса
-            command("test") {
-                val tgId = message.from?.id ?: return@command
-                val chatIdWrapper = ChatId.fromId(message.chat.id)
-
-                transaction {
-                    // 1. Берем из базы ID всех активных вопросов
-                    val questionIds = Questions.select { Questions.isActive eq true }
-                        .orderBy(Questions.sortOrder to SortOrder.ASC)
-                        .map { it[Questions.id].value }
-
-                    if (questionIds.isEmpty()) {
-                        bot.sendMessage(chatIdWrapper, text = "В базе данных нет активных вопросов.")
-                        return@transaction
-                    }
-
-                    // 2. Создаем сессию опроса в оперативной памяти
-                    com.statbot.model.SessionManager.activeSurveys[tgId] = com.statbot.model.SurveyState(questionIds)
-
-                    // 3. Берем самый первый вопрос и его текст
-                    val firstQuestionId = questionIds.first()
-                    val questionText = Questions.select { Questions.id eq firstQuestionId }
-                        .single()[Questions.text]
-
-                    // 4. Отправляем первый вопрос с кнопками 1-10
-                    bot.sendMessage(
-                        chatId = chatIdWrapper,
-                        text = "Вопрос 1: $questionText",
-                        replyMarkup = createRatingKeyboard(firstQuestionId)
-                    )
-                }
-            }
-
-            // Перехват нажатий на Inline-кнопки (оценки от 1 до 10)
-// Перехват нажатий на Inline-кнопки (оценки от 1 до 10)
             callbackQuery {
-                val data = callbackQuery.data
-                val messageObj = callbackQuery.message ?: return@callbackQuery
-                val chatIdWrapper = ChatId.fromId(messageObj.chat.id)
-                val messageId = messageObj.messageId
                 val tgId = callbackQuery.from.id
+                val chatIdWrapper = ChatId.fromId(callbackQuery.message?.chat?.id ?: return@callbackQuery)
+                val messageId = callbackQuery.message?.messageId ?: return@callbackQuery
+                val data = callbackQuery.data
 
                 if (data.startsWith("ans_")) {
                     val parts = data.split("_")
-                    val questionId = parts[1].toInt()
+                    val qId = parts[1].toInt()
                     val score = parts[2].toInt()
 
-                    // 1. Сохраняем текущий ответ в базу данных
                     transaction {
-                        val userRow = Users.select { Users.tgId eq tgId }.singleOrNull()
-                        val internalUserId = userRow?.get(Users.id)
-
-                        if (internalUserId != null) {
-                            Answers.insert {
-                                it[Answers.userId] = internalUserId
-                                it[Answers.questionId] = questionId
-                                it[Answers.score] = score
-                                it[Answers.createdAt] = LocalDateTime.now()
-                            }
-                        }
+                        Answers.insert { it[userTgId] = tgId; it[questionId] = qId; it[Answers.score] = score }
                     }
 
-                    // 2. Проверяем, есть ли следующий вопрос в сессии пользователя
-                    val session = com.statbot.model.SessionManager.activeSurveys[tgId]
-
-                    if (session != null) {
-                        session.currentIndex++ // Переходим к следующему индексу
-
-                        if (session.currentIndex < session.questionIds.size) {
-                            // Если вопросы еще есть — берем следующий
-                            val nextQuestionId = session.questionIds[session.currentIndex]
-
-                            val nextQuestionText = transaction {
-                                Questions.select { Questions.id eq nextQuestionId }.single()[Questions.text]
-                            }
-
-                            // Редактируем ТЕКУЩЕЕ сообщение: меняем текст и обновляем ID вопроса в кнопках
-                            bot.editMessageText(
-                                chatId = chatIdWrapper,
-                                messageId = messageId,
-                                text = "Вопрос ${session.currentIndex + 1}: $nextQuestionText",
-                                replyMarkup = createRatingKeyboard(nextQuestionId)
-                            )
+                    val state = SessionManager.activeSurveys[tgId]
+                    if (state != null) {
+                        val remaining = state.pendingQuestionIds.drop(1)
+                        if (remaining.isNotEmpty()) {
+                            SessionManager.activeSurveys[tgId] = SurveyState(remaining)
+                            val nextQId = remaining.first()
+                            val qText = transaction<String> { Questions.select { Questions.id eq nextQId }.single()[Questions.text] }
+                            bot.editMessageText(chatId = chatIdWrapper, messageId = messageId, text = "Вопрос: $qText", replyMarkup = createRatingKeyboard(nextQId))
                         } else {
-                            // Если это был последний вопрос — закрываем сессию
-                            com.statbot.model.SessionManager.activeSurveys.remove(tgId)
+                            SessionManager.activeSurveys.remove(tgId)
+                            bot.editMessageText(chatId = chatIdWrapper, messageId = messageId, text = "✨ Спасибо!")
 
-                            bot.editMessageText(
-                                chatId = chatIdWrapper,
-                                messageId = messageId,
-                                text = "✨ Спасибо! Все оценки приняты. Опрос успешно завершен."
-                            )
+                            val todayAvg = transaction<Double> {
+                                val avgRow = Answers.slice(Answers.score.avg()).select { Answers.createdAt greaterEq LocalDateTime.now().toLocalDate().atStartOfDay() }.singleOrNull()
+                                avgRow?.get(Answers.score.avg())?.toDouble() ?: Double.NaN
+                            }
+                            if (!todayAvg.isNaN() && todayAvg < 5.0) {
+                                sendChartToAllTeachers(bot, "🚨 ВНИМАНИЕ! Средний балл сегодня: ${String.format("%.1f", todayAvg)}/10")
+                            }
                         }
                     }
                 }
@@ -178,18 +180,127 @@ fun main() {
         }
     }
 
+    val scheduler = Executors.newSingleThreadScheduledExecutor()
+    val now = ZonedDateTime.now()
+    var nextRun = now.withHour(20).withMinute(0).withSecond(0).withNano(0)
+    if (now.isAfter(nextRun)) nextRun = nextRun.plusDays(1)
+    val initialDelay = Duration.between(now, nextRun).toSeconds()
+
+    scheduler.scheduleAtFixedRate({
+        sendChartToAllTeachers(statBot, "📊 Ежедневный отчет за неделю.")
+    }, initialDelay, TimeUnit.DAYS.toSeconds(1), TimeUnit.SECONDS)
+
+    val me = statBot.getMe().get()
+    println("====================================================")
+    println("БОТ ЗАПУЩЕН КАК: ${me.firstName} (@${me.username})")
+    println("ID БОТА: ${me.id}")
+    println("====================================================")
+
     statBot.startPolling()
-    println("Бот успешно запущен!")
+
+    statBot.startPolling()
 }
 
-// Вспомогательная функция для генерации кнопок от 1 до 10
-fun createRatingKeyboard(questionId: Int): InlineKeyboardMarkup {
-    val buttons = (1..10).map { score ->
-        InlineKeyboardButton.CallbackData(
-            text = score.toString(),
-            callbackData = "ans_${questionId}_$score"
-        )
-    }.chunked(5) // Разбиваем по 5 кнопок в ряд
+// =========================================================================
+//                       ФУНКЦИИ-ОБРАБОТЧИКИ
+// =========================================================================
 
-    return InlineKeyboardMarkup.create(buttons)
+fun handleStartSurvey(bot: Bot, message: Message) {
+    val tgId = message.from?.id ?: return
+    val chatIdWrapper = ChatId.fromId(message.chat.id)
+
+    transaction {
+        val qIds = Questions.select { Questions.isActive eq true }.orderBy(Questions.sortOrder to SortOrder.ASC).map { it[Questions.id] }
+        if (qIds.isEmpty()) return@transaction
+        SessionManager.activeSurveys[tgId] = SurveyState(qIds)
+        val qText = Questions.select { Questions.id eq qIds.first() }.single()[Questions.text]
+        bot.sendMessage(chatIdWrapper, "Вопрос 1: $qText", replyMarkup = createRatingKeyboard(qIds.first()))
+    }
+}
+
+fun handleShowStats(bot: Bot, message: Message) {
+    val chatId = message.chat.id
+    println("DEBUG: [Stats] Начало обработки...")
+
+    try {
+        val report = transaction {
+            val startOfToday = LocalDateTime.now().toLocalDate().atStartOfDay()
+
+            // Считаем вообще сколько записей есть
+            val totalAnswers = Answers.selectAll().count()
+            println("DEBUG: [Stats] Всего записей в БД: $totalAnswers")
+
+            // Считаем записи за сегодня
+            val todayAnswers = Answers.select { Answers.createdAt greaterEq startOfToday }.count()
+            println("DEBUG: [Stats] Записей за сегодня: $todayAnswers")
+
+            val stats = (Answers innerJoin Questions)
+                .slice(Questions.text, Answers.score.avg())
+                .select { Answers.createdAt greaterEq startOfToday }
+                .groupBy(Questions.text)
+                .map { it[Questions.text] to (it[Answers.score.avg()]?.toDouble() ?: 0.0) }
+
+            if (stats.isEmpty()) {
+                "Статистика за сегодня: пока нет данных (всего записей в базе: $totalAnswers)."
+            } else {
+                val sb = StringBuilder("📊 Статистика за сегодня:\n")
+                stats.forEach { (q, avg) ->
+                    sb.append("• $q: ${String.format("%.1f", avg)} / 10\n")
+                }
+                sb.toString()
+            }
+        }
+
+        println("DEBUG: [Stats] Отправляю отчет: $report")
+        bot.sendMessage(ChatId.fromId(chatId), report)
+
+    } catch (e: Exception) {
+        println("DEBUG: [Stats] ОШИБКА В ТРАНЗАКЦИИ: ${e.message}")
+        e.printStackTrace()
+        bot.sendMessage(ChatId.fromId(chatId), "Ошибка при чтении статистики: ${e.message}")
+    }
+}
+
+fun handleShowWeeklyChart(bot: Bot, message: Message) {
+    val tgId = message.from?.id ?: return
+    val chatIdWrapper = ChatId.fromId(message.chat.id)
+    bot.sendMessage(chatIdWrapper, "📊 Генерирую...")
+    val file = generateWeeklyChart()
+    bot.sendPhoto(chatIdWrapper, TelegramFile.ByFile(file), caption = "График")
+    file.delete()
+}
+
+// =========================================================================
+//                       ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// =========================================================================
+
+fun getStudentKeyboard() = KeyboardReplyMarkup(listOf(listOf(KeyboardButton("📝 Пройти опрос"))), resizeKeyboard = true)
+fun getTeacherKeyboard() = KeyboardReplyMarkup(listOf(listOf(KeyboardButton("📊 Статистика за сегодня")), listOf(KeyboardButton("📈 График за неделю"))), resizeKeyboard = true)
+fun createRatingKeyboard(qId: Int) = InlineKeyboardMarkup.create((1..10).map { InlineKeyboardButton.CallbackData(it.toString(), "ans_${qId}_$it") }.chunked(5))
+
+fun generateWeeklyChart(): File {
+    val start = LocalDate.now().minusDays(6).atStartOfDay()
+    val dbData = transaction { Answers.select { Answers.createdAt greaterEq start }.map { it[Answers.createdAt].toLocalDate() to it[Answers.score] } }
+    val grouped = dbData.groupBy { it.first }
+    val x = mutableListOf<String>(); val y = mutableListOf<Double>()
+    for (i in 6 downTo 0) {
+        val date = LocalDate.now().minusDays(i.toLong())
+        x.add(date.format(DateTimeFormatter.ofPattern("dd.MM")))
+        val scores = grouped[date]?.map { it.second } ?: emptyList()
+        y.add(if (scores.isNotEmpty()) scores.average() else 0.0)
+    }
+    val chart = CategoryChartBuilder().width(800).height(600).title("Статистика").build()
+    chart.styler.yAxisMin = 0.0; chart.styler.yAxisMax = 10.0
+    chart.addSeries("Балл", x, y)
+    val f = File.createTempFile("chart", ".png")
+    BitmapEncoder.saveBitmap(chart, f.absolutePath, BitmapEncoder.BitmapFormat.PNG)
+    return f
+}
+
+fun sendChartToAllTeachers(bot: Bot, caption: String) {
+    val ids: List<Long> = transaction { Users.select { Users.role eq "TEACHER" }.map { it[Users.tgId] } }
+    if (ids.isEmpty()) return
+    val f = generateWeeklyChart()
+    ids.forEach { bot.sendPhoto(ChatId.fromId(it), TelegramFile.ByFile(f), caption = caption) }
+    f.delete()
 }
