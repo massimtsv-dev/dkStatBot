@@ -19,6 +19,9 @@ dependencies {
     implementation("org.xerial:sqlite-jdbc:3.42.0.0")
     implementation("org.knowm.xchart:xchart:3.8.4")
     implementation("org.slf4j:slf4j-simple:1.7.36")
+    implementation("com.squareup.okhttp3:okhttp:4.11.0")
+    implementation("com.google.code.gson:gson:2.10.1")
+    implementation("com.michael-bull.kotlin-result:kotlin-result:1.1.18")
 }
 
 kotlin {
@@ -27,4 +30,8 @@ kotlin {
 
 tasks.test {
     useJUnitPlatform()
+}
+
+tasks.withType<JavaExec> {
+    jvmArgs("-Dfile.encoding=UTF-8", "-Dconsole.encoding=UTF-8")
 }
