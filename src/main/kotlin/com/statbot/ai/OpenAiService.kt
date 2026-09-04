@@ -32,17 +32,32 @@ class OpenAiService(private val apiKey: String) {
 
     fun analyzeDailyReport(fullName: String, project: String, reportData: Map<String, String>): Pair<Boolean, String> {
         val prompt = """
-            Выступай в роли HR-аналитика. Проанализируй ответы сотрудника. 
+            Выступай в роли опытного HR-аналитика и психолога. Проанализируй ответы сотрудника по новому 30-дневному регламенту опросов. 
             Имя сотрудника: $fullName
             Проект: $project
 
-            Если у сотрудника замечены признаки сильного стресса, выгорания, низких оценок (1-3 на общих ощущениях), критических падений скорости или если в поле 'Q1_PROBLEM' описана серьезная блокирующая проблема, верни JSON:
-            { "isFlagged": true, "summary": "Краткое описание ситуации НА РУССКОМ ЯЗЫКЕ с упоминанием имени сотрудника и проекта" }
+            КРИТЕРИИ ДЛЯ ВЫСТАВЛЕНИЯ ФЛАГА ТРЕВОГИ (isFlagged = true):
+            1. Низкие оценки (1-3 или 4-6) по параметрам:
+               - Энергичность / Эмоциональный настрой (DAY2_ENERGY, DAY16_EMOTIONAL)
+               - Скорость работы (DAY2_SPEED, DAY16_SPEED)
+               - Вовлеченность в проекты (DAY4_ENGAGEMENT)
+               - Включенность на созвонах или комфорт нагрузки (DAY11_CALL_ENGAGEMENT, DAY11_WORKLOAD)
+               - Счастье в компании (DAY25_HAPPINESS)
+               - Общая оценка недели (FRI_WEEK_SCORE)
+            2. Низкий процент выполнения задач за неделю: FRI_TASK_PCT = '<30%' или '50%'.
+            3. Сильные блокираторы, завалы или проблемы в открытых ответах:
+               - DAY2_SPEED_WHY (что помешало работать на максимальной скорости)
+               - DAY4_ENGAGEMENT_WHY (что снижает вовлеченность)
+               - FRI_MISSED_REASON (причины невыполнения запланированных задач)
+               - MON_TASKS_CHANGES (критические срывы планов)
+
+            Если ХОТЯ БЫ ОДИН из этих факторов указывает на критический завал, стресс, выгорание или конфликт, верни JSON:
+            { "isFlagged": true, "summary": "Кратко (2-3 предложения) на РУССКОМ ЯЗЫКЕ опиши проблему, указав имя сотрудника и проект" }
             
-            В противном случае верни:
+            В противном случае (если показатели нормальные или выше средних) верни:
             { "isFlagged": false, "summary": "" }
 
-            КРИТИЧЕСКОЕ ТРЕБОВАНИЕ: Поле 'summary' должно быть полностью на РУССКОМ ЯЗЫКЕ. Не используй английский язык.
+            СТРОГОЕ ТРЕБОВАНИЕ: Текст в поле 'summary' должен быть ИСКЛЮЧИТЕЛЬНО на РУССКОМ ЯЗЫКЕ.
             
             Ответы сотрудника:
             $reportData
@@ -93,4 +108,59 @@ class OpenAiService(private val apiKey: String) {
             throw IOException("Ошибка совместимости OkHttp версий: ${e.message}", e)
         }
     }
+
+    fun transcribeVoice(fileUrl: String): String {
+        try {
+            // Скачиваем аудиофайл во временную директорию
+            val audioBytes = OkHttpClient().newCall(Request.Builder().url(fileUrl).build()).execute().body()?.bytes()
+                ?: throw IOException("Не удалось скачать аудиофайл")
+            val tempFile = java.io.File.createTempFile("voice_", ".ogg").apply {
+                writeBytes(audioBytes)
+                deleteOnExit()
+            }
+
+            // Формируем multipart/form-data запрос для OpenAI Whisper API
+            val requestBodyBuilderClass = Class.forName("okhttp3.MultipartBody${'$'}Builder")
+            val builderInstance = requestBodyBuilderClass.getConstructor().newInstance()
+
+            val setTypeMethod = requestBodyBuilderClass.getMethod("setType", Class.forName("okhttp3.MediaType"))
+            val mediaTypeClass = Class.forName("okhttp3.MediaType")
+            val parseMethod = mediaTypeClass.getMethod("parse", String::class.java)
+            val formDataMediaType = parseMethod.invoke(null, "multipart/form-data")
+            setTypeMethod.invoke(builderInstance, formDataMediaType)
+
+            val audioMediaType = parseMethod.invoke(null, "audio/ogg")
+            val requestBodyClass = Class.forName("okhttp3.RequestBody")
+            val createFromFileMethod = requestBodyClass.getMethod("create", mediaTypeClass, java.io.File::class.java)
+            val fileBody = createFromFileMethod.invoke(null, audioMediaType, tempFile)
+
+            val addFormDataPartMethod = requestBodyBuilderClass.getMethod("addFormDataPart", String::class.java, String::class.java, requestBodyClass)
+            addFormDataPartMethod.invoke(builderInstance, "file", tempFile.name, fileBody)
+
+            val addTextPartMethod = requestBodyBuilderClass.getMethod("addFormDataPart", String::class.java, String::class.java)
+            addTextPartMethod.invoke(builderInstance, "model", "whisper-1")
+
+            val buildMethod = requestBodyBuilderClass.getMethod("build")
+            val body = buildMethod.invoke(builderInstance) as okhttp3.RequestBody
+
+            val request = Request.Builder()
+                .url("https://api.openai.com/v1/audio/transcriptions")
+                .addHeader("Authorization", "Bearer $apiKey")
+                .post(body)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) throw IOException("Ошибка Whisper API: $response")
+                val bodyMethod = response.javaClass.getMethod("body")
+                val responseBody = bodyMethod.invoke(response) as? okhttp3.ResponseBody
+                val jsonString = responseBody?.string() ?: ""
+                val jsonObj = gson.fromJson(jsonString, JsonObject::class.java)
+                return jsonObj.get("text")?.asString ?: ""
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            return "[Не удалось распознать голосовое сообщение]"
+        }
+    }
+
 }

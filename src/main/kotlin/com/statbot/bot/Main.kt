@@ -6,6 +6,7 @@ import com.github.kotlintelegrambot.dispatcher.callbackQuery
 import com.github.kotlintelegrambot.dispatcher.command
 import com.github.kotlintelegrambot.dispatcher.photos
 import com.github.kotlintelegrambot.dispatcher.text
+import com.github.kotlintelegrambot.dispatcher.voice
 import com.github.kotlintelegrambot.entities.ChatId
 import com.github.kotlintelegrambot.entities.InlineKeyboardMarkup
 import com.github.kotlintelegrambot.entities.keyboard.InlineKeyboardButton
@@ -30,7 +31,6 @@ object BotDispatcher {
     }
 }
 
-// Глубокий сканер для разбора сетевых ответов библиотек
 fun extractTelegramProperty(obj: Any?, targetProp: String): String? {
     if (obj == null) return null
     val queue = ArrayDeque<Any>()
@@ -103,6 +103,7 @@ fun main() {
         dispatch {
             command("start") {
                 val tgId = message.from?.id ?: return@command
+                val username = message.from?.username
                 val chatId = ChatId.fromId(message.chat.id)
 
                 val userRole = transaction {
@@ -111,9 +112,13 @@ fun main() {
                         Users.insert {
                             it[Users.tgId] = tgId
                             it[Users.role] = "STUDENT"
+                            it[Users.username] = username
                         }
                         "STUDENT"
                     } else {
+                        if (!username.isNullOrBlank()) {
+                            Users.update({ Users.tgId eq tgId }) { it[Users.username] = username }
+                        }
                         userRow[Users.role]
                     }
                 }
@@ -242,6 +247,42 @@ fun main() {
                     bot.sendMessage(chatId, "❌ Не удалось получить файл скриншота.")
                 }
             }
+
+            voice {
+                val tgId = message.from?.id ?: return@voice
+                val chatId = ChatId.fromId(message.chat.id)
+                val voiceObj = message.voice ?: return@voice
+
+                bot.sendMessage(chatId, "🎤 Распознаю голосовое сообщение...")
+
+                val fileResult = bot.getFile(voiceObj.fileId)
+                val filePath = extractTelegramProperty(fileResult, "path")
+
+                if (filePath != null) {
+                    val botToken = System.getenv("BOT_TOKEN") ?: Properties().apply {
+                        val file = java.io.File("local.properties")
+                        if (file.exists()) load(file.inputStream())
+                    }.getProperty("BOT_TOKEN") ?: ""
+
+                    val fileUrl = "https://api.telegram.org/file/bot$botToken/$filePath"
+
+                    Thread {
+                        val apiKey = System.getenv("OPENAI_API_KEY") ?: Properties().apply {
+                            val file = java.io.File("local.properties")
+                            if (file.exists()) load(file.inputStream())
+                        }.getProperty("OPENAI_API_KEY") ?: ""
+
+                        val openai = com.statbot.ai.OpenAiService(apiKey)
+                        val recognizedText = openai.transcribeVoice(fileUrl)
+
+                        bot.sendMessage(chatId, "🗣 **Расшифровка:** \"$recognizedText\"")
+                        SurveyManager.processAnswer(bot, tgId, chatId, textAnswer = recognizedText, callbackData = null)
+                    }.start()
+                } else {
+                    bot.sendMessage(chatId, "❌ Не удалось прочитать голосовое сообщение.")
+                }
+            }
+
         }
     }
 
