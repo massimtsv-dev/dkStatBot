@@ -38,7 +38,7 @@ object SurveyManager {
 
         val today = LocalDate.now()
         val dayOfWeek = today.dayOfWeek
-        val cycleDay = DbRepository.getOrCreateReport(tgId, today)
+        val cycleDay = DbRepository.getUserCycleDay(tgId, today)
 
         val state = SurveyState(reportId = reportId)
         SessionManager.activeSurveys[tgId] = state
@@ -48,23 +48,36 @@ object SurveyManager {
         when {
             dayOfWeek == DayOfWeek.MONDAY -> startMondaySurvey(bot, chatId, state, tgId)
             dayOfWeek == DayOfWeek.FRIDAY -> startFridaySurvey(bot, chatId, state)
-            else -> startDailySurveyByCycle(bot, chatId, state, cycleDay)
+            else -> startDailySurveyByCycle(bot, chatId, state, cycleDay, tgId)
         }
     }
 
-    private fun startMondaySurvey(bot: Bot, chatId: ChatId, state: SurveyState, tgId: Long) {
-        state.currentStep = SurveyStep.MON_TASKS_CHECK
-        val tasks = DbRepository.getUserData(tgId)?.get(com.statbot.db.Users.currentWeeklyTasks) ?: "не указаны"
+    fun startGoalUpdate(bot: Bot, tgId: Long, chatId: ChatId) {
+        val reportId = DbRepository.getOrCreateReport(tgId)
+        SessionManager.activeSurveys[tgId] = SurveyState(SurveyStep.UPDATE_GOALS_YEAR, reportId)
         bot.sendMessage(
             chatId,
-            text = "В пятницу ты запланировал(а) такие задачи на текущую неделю:\n$tasks\n\nВсе ли актуально?",
-            replyMarkup = InlineKeyboardMarkup.create(
-                listOf(
-                    listOf(InlineKeyboardButton.CallbackData("Да, все актуально", "ans_mon_yes")),
-                    listOf(InlineKeyboardButton.CallbackData("Нет, есть изменения", "ans_mon_no"))
+            "🔄 Режим обновления целей\n\n1. Каких новых результатов ты хочешь достичь за этот год?"
+        )
+    }
+
+    private fun startMondaySurvey(bot: Bot, chatId: ChatId, state: SurveyState, tgId: Long) {
+        val tasks = DbRepository.getUserData(tgId)?.get(com.statbot.db.Users.currentWeeklyTasks)
+        if (tasks.isNullOrBlank()) {
+            continueToDailyCycle(bot, tgId, chatId, state)
+        } else {
+            state.currentStep = SurveyStep.MON_TASKS_CHECK
+            bot.sendMessage(
+                chatId,
+                text = "В пятницу ты запланировал(а) такие задачи на текущую неделю:\n$tasks\n\nВсе ли актуально?",
+                replyMarkup = InlineKeyboardMarkup.create(
+                    listOf(
+                        listOf(InlineKeyboardButton.CallbackData("Да, все актуально", "ans_mon_yes")),
+                        listOf(InlineKeyboardButton.CallbackData("Нет, есть изменения", "ans_mon_no"))
+                    )
                 )
             )
-        )
+        }
     }
 
     private fun startFridaySurvey(bot: Bot, chatId: ChatId, state: SurveyState) {
@@ -76,7 +89,7 @@ object SurveyManager {
         )
     }
 
-    private fun startDailySurveyByCycle(bot: Bot, chatId: ChatId, state: SurveyState, cycleDay: Int) {
+    private fun startDailySurveyByCycle(bot: Bot, chatId: ChatId, state: SurveyState, cycleDay: Int, tgId: Long) {
         when (cycleDay) {
             2 -> {
                 state.currentStep = SurveyStep.DAY2_ENERGY
@@ -148,12 +161,12 @@ object SurveyManager {
                 ))
             }
             else -> {
-                bot.sendMessage(chatId, "Сегодня нет обязательных вопросов по графику. Хорошего рабочего дня!")
+                SessionManager.activeSurveys.remove(tgId)
+                bot.sendMessage(chatId, "Сегодня нет обязательных вопросов по графику. Хорошего рабочего дня! 🚀")
             }
         }
     }
 
-    // ВОССТАНОВЛЕН ПАРАМЕТР photoUrl
     fun processAnswer(bot: Bot, tgId: Long, chatId: ChatId, textAnswer: String?, callbackData: String?, photoUrl: String? = null) {
         val state = SessionManager.activeSurveys[tgId] ?: return
         val valData = callbackData?.removePrefix("ans_")
@@ -187,10 +200,25 @@ object SurveyManager {
                 }
             }
 
+            SurveyStep.UPDATE_GOALS_YEAR -> {
+                if (textAnswer != null) {
+                    DbRepository.setUserGoals(tgId, textAnswer, null)
+                    state.currentStep = SurveyStep.UPDATE_GOALS_3MONTHS
+                    bot.sendMessage(chatId, "2. Отлично! Теперь напиши свои новые цели на ближайшие 3 месяца:")
+                }
+            }
+            SurveyStep.UPDATE_GOALS_3MONTHS -> {
+                if (textAnswer != null) {
+                    DbRepository.setUserGoals(tgId, null, textAnswer)
+                    SessionManager.activeSurveys.remove(tgId)
+                    bot.sendMessage(chatId, "✅ Твои цели успешно обновлены и сохранены в базе!")
+                }
+            }
+
             SurveyStep.MON_TASKS_CHECK -> {
                 if (valData == "mon_yes") {
                     save(state, "MON_TASKS", "Да, все актуально")
-                    endSurvey(bot, tgId, chatId, state)
+                    continueToDailyCycle(bot, tgId, chatId, state)
                 } else if (valData == "mon_no") {
                     state.currentStep = SurveyStep.MON_TASKS_CHANGES
                     bot.sendMessage(chatId, "Опиши изменения в задачах:")
@@ -199,7 +227,7 @@ object SurveyManager {
             SurveyStep.MON_TASKS_CHANGES -> {
                 if (textAnswer != null) {
                     save(state, "MON_TASKS_CHANGES", textAnswer)
-                    endSurvey(bot, tgId, chatId, state)
+                    continueToDailyCycle(bot, tgId, chatId, state)
                 }
             }
 
@@ -208,7 +236,7 @@ object SurveyManager {
                     save(state, "FRI_WEEK_SCORE", valData)
                     state.currentStep = SurveyStep.FRI_CALL_DAYS
                     bot.sendMessage(chatId, "2. Сколько дней ты был(а) на созвонах за эту неделю?", replyMarkup = InlineKeyboardMarkup.create(
-                        listOf(listOf("1", "2", "3", "4", "5").map { InlineKeyboardButton.CallbackData(it, "ans_$it") })
+                        listOf(listOf("0", "1", "2", "3", "4", "5").map { InlineKeyboardButton.CallbackData(it, "ans_$it") })
                     ))
                 }
             }
@@ -216,8 +244,13 @@ object SurveyManager {
                 if (valData != null) {
                     save(state, "FRI_CALL_DAYS", valData)
                     state.currentStep = SurveyStep.FRI_TASK_PCT
-                    val tasks = DbRepository.getUserData(tgId)?.get(com.statbot.db.Users.currentWeeklyTasks) ?: "не указаны"
-                    bot.sendMessage(chatId, "3. На эту неделю ты ставил(а) такие задачи:\n$tasks\n\nОтметь процент их выполнения:", replyMarkup = InlineKeyboardMarkup.create(
+                    val tasks = DbRepository.getUserData(tgId)?.get(com.statbot.db.Users.currentWeeklyTasks)
+                    val questionText = if (tasks.isNullOrBlank()) {
+                        "3. Отметь процент выполнения твоих рабочих задач за эту неделю:"
+                    } else {
+                        "3. На эту неделю ты ставил(а) такие задачи:\n$tasks\n\nОтметь процент их выполнения:"
+                    }
+                    bot.sendMessage(chatId, text = questionText, replyMarkup = InlineKeyboardMarkup.create(
                         listOf(
                             listOf(InlineKeyboardButton.CallbackData("100%", "ans_100")),
                             listOf(InlineKeyboardButton.CallbackData("70-90%", "ans_70-90")),
@@ -309,6 +342,115 @@ object SurveyManager {
                 }
             }
 
+            SurveyStep.DAY9_INITIATIVE -> {
+                if (valData != null) {
+                    save(state, "DAY9_INITIATIVE", valData)
+                    state.currentStep = SurveyStep.DAY9_PLANNING_QUALITY
+                    bot.sendMessage(chatId, "2. Оцени качество планирования рабочего дня:", replyMarkup = InlineKeyboardMarkup.create(STANDARD_RATING))
+                }
+            }
+            SurveyStep.DAY9_PLANNING_QUALITY -> {
+                if (valData != null) {
+                    save(state, "DAY9_PLANNING_QUALITY", valData)
+                    endSurvey(bot, tgId, chatId, state)
+                }
+            }
+
+            SurveyStep.DAY11_CALL_ENGAGEMENT -> {
+                if (valData != null) {
+                    save(state, "DAY11_CALL_ENGAGEMENT", valData)
+                    state.currentStep = SurveyStep.DAY11_WORKLOAD
+                    bot.sendMessage(chatId, "2. Оцени насколько комфортна текущая рабочая нагрузка:", replyMarkup = InlineKeyboardMarkup.create(STANDARD_RATING))
+                }
+            }
+            SurveyStep.DAY11_WORKLOAD -> {
+                if (valData != null) {
+                    save(state, "DAY11_WORKLOAD", valData)
+                    endSurvey(bot, tgId, chatId, state)
+                }
+            }
+
+            SurveyStep.DAY16_EMOTIONAL -> {
+                if (valData != null) {
+                    save(state, "DAY16_EMOTIONAL", valData)
+                    state.currentStep = SurveyStep.DAY16_SPEED
+                    bot.sendMessage(chatId, "2. Оцени скорость выполнения задач:", replyMarkup = InlineKeyboardMarkup.create(STANDARD_RATING))
+                }
+            }
+            SurveyStep.DAY16_SPEED -> {
+                if (valData != null) {
+                    save(state, "DAY16_SPEED", valData)
+                    if (valData == "4-6" || valData == "1-3") {
+                        state.currentStep = SurveyStep.DAY16_SPEED_WHY
+                        bot.sendMessage(chatId, "Что помешало тебе работать на максимальной скорости?")
+                    } else {
+                        endSurvey(bot, tgId, chatId, state)
+                    }
+                }
+            }
+            SurveyStep.DAY16_SPEED_WHY -> {
+                if (textAnswer != null) {
+                    save(state, "DAY16_SPEED_WHY", textAnswer)
+                    endSurvey(bot, tgId, chatId, state)
+                }
+            }
+
+            SurveyStep.DAY18_CALL_VALUE -> {
+                if (valData != null) {
+                    save(state, "DAY18_CALL_VALUE", valData)
+                    state.currentStep = SurveyStep.DAY18_EXPERT_LEVEL
+                    bot.sendMessage(chatId, "2. Насколько вырос твой экспертный уровень за последнее время?", replyMarkup = InlineKeyboardMarkup.create(STANDARD_RATING))
+                }
+            }
+            SurveyStep.DAY18_EXPERT_LEVEL -> {
+                if (valData != null) {
+                    save(state, "DAY18_EXPERT_LEVEL", valData)
+                    endSurvey(bot, tgId, chatId, state)
+                }
+            }
+
+            SurveyStep.DAY23_NOTES_QUALITY -> {
+                if (valData != null) {
+                    save(state, "DAY23_NOTES_QUALITY", valData)
+                    state.currentStep = SurveyStep.DAY23_UNFINISHED_TASKS
+                    bot.sendMessage(chatId, "2. Есть ли зависшие задачи, которые тянутся дольше планируемого?")
+                }
+            }
+            SurveyStep.DAY23_UNFINISHED_TASKS -> {
+                if (textAnswer != null) {
+                    save(state, "DAY23_UNFINISHED_TASKS", textAnswer)
+                    endSurvey(bot, tgId, chatId, state)
+                }
+            }
+
+            SurveyStep.DAY25_HAPPINESS -> {
+                if (valData != null) {
+                    save(state, "DAY25_HAPPINESS", valData)
+                    state.currentStep = SurveyStep.DAY25_HARD_TASKS
+                    bot.sendMessage(chatId, "2. С какими главными трудностями ты сталкиваешься в работе?")
+                }
+            }
+            SurveyStep.DAY25_HARD_TASKS -> {
+                if (textAnswer != null) {
+                    save(state, "DAY25_HARD_TASKS", textAnswer)
+                    endSurvey(bot, tgId, chatId, state)
+                }
+            }
+
+            SurveyStep.DAY30_HOURS -> {
+                if (valData != null) {
+                    save(state, "DAY30_HOURS", valData)
+                    state.currentStep = SurveyStep.DAY30_POTENTIAL
+                    bot.sendMessage(chatId, "2. На сколько процентов ты оцениваешь реализацию своего потенциала?", replyMarkup = InlineKeyboardMarkup.create(STANDARD_RATING))
+                }
+            }
+            SurveyStep.DAY30_POTENTIAL -> {
+                if (valData != null) {
+                    save(state, "DAY30_POTENTIAL", valData)
+                    endSurvey(bot, tgId, chatId, state)
+                }
+            }
+
             else -> {
                 if (valData != null) save(state, state.currentStep.name, valData)
                 if (textAnswer != null) save(state, state.currentStep.name, textAnswer)
@@ -316,6 +458,12 @@ object SurveyManager {
                 endSurvey(bot, tgId, chatId, state)
             }
         }
+    }
+
+    private fun continueToDailyCycle(bot: Bot, tgId: Long, chatId: ChatId, state: SurveyState) {
+        val today = LocalDate.now()
+        val cycleDay = DbRepository.getUserCycleDay(tgId, today)
+        startDailySurveyByCycle(bot, chatId, state, cycleDay, tgId)
     }
 
     private fun askFriExtraTasks(bot: Bot, chatId: ChatId, state: SurveyState) {
@@ -349,7 +497,7 @@ object SurveyManager {
                 val (isFlagged, summary) = openai.analyzeDailyReport(empName, empProject, state.reportData)
                 if (isFlagged) {
                     DbRepository.saveAiAlert(state.reportId, summary)
-                    BotDispatcher.notifyTeachers(bot, "🚨 **AI Анализ ТЗ:**\n👤 **Сотрудник:** $empName\n🎬 **Проект:** $empProject\n\n📝 **Вывод:** $summary")
+                    BotDispatcher.notifyTeachers(bot, "🚨 AI Анализ ТЗ:\n👤 Сотрудник: $empName\n🎬 Проект: $empProject\n\n📝 Вывод: $summary")
                 }
             } catch (e: Exception) {
                 e.printStackTrace()

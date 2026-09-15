@@ -137,12 +137,12 @@ object DbRepository {
             .orderBy(DailyReports.id to org.jetbrains.exposed.sql.SortOrder.DESC)
             .limit(5)
             .map {
-                "👤 **${it[Users.fullName] ?: "Сотрудник"}** [${it[Users.project] ?: "Без проекта"}]\n📅 Дата: ${it[DailyReports.date]}\n🚨 **ИИ:** ${it[DailyReports.aiSummary]}"
+                "👤 ${it[Users.fullName] ?: "Сотрудник"} [${it[Users.project] ?: "Без проекта"}]\n📅 Дата: ${it[DailyReports.date]}\n🚨 ИИ: ${it[DailyReports.aiSummary]}"
             }
     }
 
     fun getAllStudents(): List<Pair<Long, String>> = transaction {
-        Users.select { Users.fullName.isNotNull() }.map {
+        Users.select { (Users.fullName.isNotNull()) and (Users.role eq "STUDENT") }.map {
             it[Users.tgId] to (it[Users.fullName] ?: "ID: ${it[Users.tgId]}")
         }
     }
@@ -159,13 +159,13 @@ object DbRepository {
         val telegramDisplay = if (!rawUsername.isNullOrBlank()) "@$rawUsername" else "$studentTgId"
 
         """
-            👤 **Ученик:** ${userRow[Users.fullName] ?: "Не заполнено"}
-            🎬 **Проект:** ${userRow[Users.project] ?: "Не заполнено"}
-            🆔 **Telegram ID:** $telegramDisplay
+            👤 Ученик: ${userRow[Users.fullName] ?: "Не заполнено"}
+            🎬 Проект: ${userRow[Users.project] ?: "Не заполнено"}
+            🆔 Telegram ID: $telegramDisplay
             -----------------------------------
             📈 Всего сессий опроса: $total
             ✅ Пройдено полностью: $completed
-            🚨 Флагов выгорания от ИИ: $flagged
+            🚨 Анализ выгорания AI: $flagged
         """.trimIndent()
     }
 
@@ -227,12 +227,12 @@ object DbRepository {
         val formattedTaskPct = if (avgTaskPct != "Нет данных") "$avgTaskPct%" else "Нет данных"
 
         """
-            📋 **Общая активность:**
+            📋 Общая активность:
             Всего запущено опросов: $total
             ✅ Успешно заполнено: $completed
             🚨 Алертов от OpenAI: $flagged
 
-            📊 **Средние показатели команды (ТЗ):**
+            📊 Средние показатели команды:
             ⚡ Энергия и настрой (1-10): $avgEnergy
             🚀 Скорость работы (1-10): $avgSpeed
             🔥 Вовлеченность в проекты (1-10): $avgEngagement
@@ -243,5 +243,11 @@ object DbRepository {
             📅 Оценка рабочей недели (1-10): $avgWeekScore
             🎯 Выполнение задач недели: $formattedTaskPct
         """.trimIndent()
+    }
+
+    fun getUserCycleDay(tgId: Long, date: LocalDate = LocalDate.now()): Int = transaction {
+        getOrCreateReport(tgId, date)
+        DailyReports.select { (DailyReports.userTgId eq tgId) and (DailyReports.date eq date) }
+            .singleOrNull()?.get(DailyReports.cycleDay) ?: 1
     }
 }

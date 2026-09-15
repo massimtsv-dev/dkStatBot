@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm") version "2.4.0"
+    id("com.gradleup.shadow") version "8.3.6"
 }
 
 group = "org.example"
@@ -34,4 +35,14 @@ tasks.test {
 
 tasks.withType<JavaExec> {
     jvmArgs("-Dfile.encoding=UTF-8", "-Dconsole.encoding=UTF-8")
+}
+
+tasks.withType<Jar> {
+    manifest {
+        attributes["Main-Class"] = "com.statbot.bot.MainKt"
+    }
+    from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) }) {
+        exclude("META-INF/*.SF", "META-INF/*.DSA", "META-INF/*.RSA")
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }

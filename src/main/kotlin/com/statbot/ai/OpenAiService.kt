@@ -111,15 +111,16 @@ class OpenAiService(private val apiKey: String) {
 
     fun transcribeVoice(fileUrl: String): String {
         try {
-            // Скачиваем аудиофайл во временную директорию
-            val audioBytes = OkHttpClient().newCall(Request.Builder().url(fileUrl).build()).execute().body()?.bytes()
-                ?: throw IOException("Не удалось скачать аудиофайл")
+            val downloadResponse = client.newCall(Request.Builder().url(fileUrl).build()).execute()
+            val downloadBodyMethod = downloadResponse.javaClass.getMethod("body")
+            val downloadResponseBody = downloadBodyMethod.invoke(downloadResponse) as? okhttp3.ResponseBody
+            val audioBytes = downloadResponseBody?.bytes() ?: throw IOException("Не удалось скачать аудиофайл")
+
             val tempFile = java.io.File.createTempFile("voice_", ".ogg").apply {
                 writeBytes(audioBytes)
                 deleteOnExit()
             }
 
-            // Формируем multipart/form-data запрос для OpenAI Whisper API
             val requestBodyBuilderClass = Class.forName("okhttp3.MultipartBody${'$'}Builder")
             val builderInstance = requestBodyBuilderClass.getConstructor().newInstance()
 
@@ -162,5 +163,4 @@ class OpenAiService(private val apiKey: String) {
             return "[Не удалось распознать голосовое сообщение]"
         }
     }
-
 }

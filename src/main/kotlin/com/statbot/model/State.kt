@@ -3,17 +3,15 @@ package com.statbot.model
 import java.util.concurrent.ConcurrentHashMap
 
 enum class SurveyStep {
-    // Регистрация профиля
     REG_FULL_NAME, REG_PROJECT,
 
-    // Ввод начальных целей (один раз в самом начале)
     INIT_GOALS_YEAR, INIT_GOALS_3MONTHS,
 
-    // Еженедельные регулярные вопросы
+    UPDATE_GOALS_YEAR, UPDATE_GOALS_3MONTHS,
+
     MON_TASKS_CHECK, MON_TASKS_CHANGES,
     FRI_WEEK_SCORE, FRI_CALL_DAYS, FRI_TASK_PCT, FRI_TASK_MISSED_REASON, FRI_EXTRA_TASKS_YESNO, FRI_EXTRA_TASKS_LIST, FRI_NEXT_WEEK_TASKS,
 
-    // Вопросы по дням цикла (ТЗ)
     DAY2_ENERGY, DAY2_SPEED, DAY2_SPEED_WHY,
     DAY3_NEW_INFO,
     DAY4_ENGAGEMENT, DAY4_ENGAGEMENT_WHY,

@@ -71,7 +71,6 @@ fun extractTelegramProperty(obj: Any?, targetProp: String): String? {
     return null
 }
 
-// Функция отрисовки главного меню преподавателя
 fun sendTeacherMenu(bot: com.github.kotlintelegrambot.Bot, chatId: ChatId) {
     val markup = InlineKeyboardMarkup.create(
         listOf(
@@ -82,7 +81,7 @@ fun sendTeacherMenu(bot: com.github.kotlintelegrambot.Bot, chatId: ChatId) {
             listOf(InlineKeyboardButton.CallbackData("🚨 Последние 5 AI алертов", "t_stats_ai"))
         )
     )
-    bot.sendMessage(chatId, "🎛 **Панель управления преподавателя**\nВыберите интересующий формат аналитики:", replyMarkup = markup)
+    bot.sendMessage(chatId, "🎛 Панель управления преподавателя\nВыберите интересующий формат аналитики:", replyMarkup = markup)
 }
 
 fun main() {
@@ -126,7 +125,7 @@ fun main() {
                 if (userRole == "TEACHER") {
                     sendTeacherMenu(bot, chatId)
                 } else {
-                    bot.sendMessage(chatId, "Привет! Я бот для сбора статистики. Чтобы запустить опрос вручную, введи команду /survey.")
+                    bot.sendMessage(chatId, "Привет! Я бот для сбора статистики.\n\nКоманды:\n/survey — запустить опрос вручную\n/changegoals — обновить свои цели на год и 3 месяца")
                 }
             }
 
@@ -149,10 +148,10 @@ fun main() {
 
                 if (password == "SuperStat2026") {
                     transaction {
-                        Users.update({ Users.tgId eq tgId }) { it[role] = "TEACHER" }
+                        Users.update({ Users.tgId eq tgId }) { it[Users.role] = "TEACHER" }
                         BotDispatcher.teacherIds = Users.select { Users.role eq "TEACHER" }.map { it[Users.tgId] }
                     }
-                    bot.sendMessage(chatId, "✅ Роль ПРЕПОДАВАТЕЛЯ успешно получена! Наберите /teacher для входа в меню.")
+                    bot.sendMessage(chatId, "✅ Роль ПРЕПОДАВАТЕЛЯ успешно получена! Команда /teacher для входа в меню.")
                 } else {
                     bot.sendMessage(chatId, "❌ Неверный ключ авторизации.")
                 }
@@ -161,6 +160,18 @@ fun main() {
             command("survey") {
                 val tgId = message.from?.id ?: return@command
                 SurveyManager.startSurvey(bot, tgId, ChatId.fromId(message.chat.id))
+            }
+
+            command("changegoals") {
+                val tgId = message.from?.id ?: return@command
+                val chatId = ChatId.fromId(message.chat.id)
+                val userRole = transaction { Users.select { Users.tgId eq tgId }.singleOrNull()?.get(Users.role) }
+
+                if (userRole == "STUDENT") {
+                    SurveyManager.startGoalUpdate(bot, tgId, chatId)
+                } else {
+                    bot.sendMessage(chatId, "❌ Эта команда доступна только ученикам.")
+                }
             }
 
             text {
@@ -180,24 +191,22 @@ fun main() {
                     SurveyManager.processAnswer(bot, tgId, chatId, textAnswer = null, callbackData = data)
                 } else if (data.startsWith("focus_")) {
                     bot.sendMessage(chatId, "Записано! Твой статус активности сохранен.")
-                }
-                // --- ОБРАБОТКА НАЖАТИЙ В МЕНЮ ПРЕПОДАВАТЕЛЯ ---
-                else if (data.startsWith("t_stats_")) {
+                } else if (data.startsWith("t_stats_")) {
                     val subType = data.removePrefix("t_stats_")
                     val today = LocalDate.now()
 
                     when (subType) {
                         "day" -> {
                             val res = DbRepository.getPeriodStats(today)
-                            bot.sendMessage(chatId, "📊 **Статистика за сегодня ($today):**\n\n$res")
+                            bot.sendMessage(chatId, "📊 Статистика за сегодня ($today):\n\n$res")
                         }
                         "week" -> {
                             val res = DbRepository.getPeriodStats(today.minusDays(7))
-                            bot.sendMessage(chatId, "📅 **Статистика за последние 7 дней:**\n\n$res")
+                            bot.sendMessage(chatId, "📅 Статистика за последние 7 дней:\n\n$res")
                         }
                         "month" -> {
                             val res = DbRepository.getPeriodStats(today.minusMonths(1))
-                            bot.sendMessage(chatId, "🗓 **Статистика за последние 30 дней:**\n\n$res")
+                            bot.sendMessage(chatId, "🗓 Статистика за последние 30 дней:\n\n$res")
                         }
                         "ai" -> {
                             val alerts = DbRepository.getLast5AiAlerts()
@@ -205,7 +214,7 @@ fun main() {
                                 bot.sendMessage(chatId, "✅ Критических отклонений от ИИ за последнее время не зафиксировано.")
                             } else {
                                 val text = alerts.joinToString("\n\n-----------------------------------\n\n")
-                                bot.sendMessage(chatId, "🚨 **Последние 5 алертов от OpenAI:**\n\n$text")
+                                bot.sendMessage(chatId, "🚨 Последние 5 алертов:\n\n$text")
                             }
                         }
                         "students" -> {
@@ -213,7 +222,6 @@ fun main() {
                             if (students.isEmpty()) {
                                 bot.sendMessage(chatId, "👥 В базе данных пока нет зарегистрированных учеников.")
                             } else {
-                                // Формируем выпадающий список (кнопки) учеников
                                 val buttons = students.map { (id, name) ->
                                     listOf(InlineKeyboardButton.CallbackData(name, "t_select_student_$id"))
                                 }
@@ -221,9 +229,7 @@ fun main() {
                             }
                         }
                     }
-                }
-                // Вывод персональной статистики конкретного ученика
-                else if (data.startsWith("t_select_student_")) {
+                } else if (data.startsWith("t_select_student_")) {
                     val studentId = data.removePrefix("t_select_student_").toLongOrNull()
                     if (studentId != null) {
                         val stats = DbRepository.getStudentStats(studentId)
@@ -259,16 +265,11 @@ fun main() {
                 val filePath = extractTelegramProperty(fileResult, "path")
 
                 if (filePath != null) {
-                    val botToken = System.getenv("BOT_TOKEN") ?: Properties().apply {
-                        val file = java.io.File("local.properties")
-                        if (file.exists()) load(file.inputStream())
-                    }.getProperty("BOT_TOKEN") ?: ""
-
                     val fileUrl = "https://api.telegram.org/file/bot$botToken/$filePath"
 
                     Thread {
                         val apiKey = System.getenv("OPENAI_API_KEY") ?: Properties().apply {
-                            val file = java.io.File("local.properties")
+                            val file = File("local.properties")
                             if (file.exists()) load(file.inputStream())
                         }.getProperty("OPENAI_API_KEY") ?: ""
 
