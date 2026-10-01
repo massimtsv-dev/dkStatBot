@@ -7,6 +7,7 @@ import com.github.kotlintelegrambot.dispatcher.command
 import com.github.kotlintelegrambot.dispatcher.photos
 import com.github.kotlintelegrambot.dispatcher.text
 import com.github.kotlintelegrambot.dispatcher.voice
+import com.github.kotlintelegrambot.entities.BotCommand
 import com.github.kotlintelegrambot.entities.ChatId
 import com.github.kotlintelegrambot.entities.InlineKeyboardMarkup
 import com.github.kotlintelegrambot.entities.keyboard.InlineKeyboardButton
@@ -66,7 +67,7 @@ fun extractTelegramProperty(obj: Any?, targetProp: String): String? {
                     }
                 }
             }
-        } catch (e: Exception) {}
+        } catch (_: Exception) {}
     }
     return null
 }
@@ -125,7 +126,7 @@ fun main() {
                 if (userRole == "TEACHER") {
                     sendTeacherMenu(bot, chatId)
                 } else {
-                    bot.sendMessage(chatId, "Привет! Я бот для сбора статистики.\n\nКоманды:\n/survey — запустить опрос вручную\n/changegoals — обновить свои цели на год и 3 месяца")
+                    SurveyManager.startSurvey(bot, tgId, chatId)
                 }
             }
 
@@ -185,12 +186,21 @@ fun main() {
             callbackQuery {
                 val tgId = callbackQuery.from.id
                 val chatId = ChatId.fromId(callbackQuery.message?.chat?.id ?: return@callbackQuery)
+                val messageId = callbackQuery.message?.messageId
                 val data = callbackQuery.data
 
+                bot.answerCallbackQuery(callbackQuery.id)
+
                 if (data.startsWith("ans_")) {
-                    SurveyManager.processAnswer(bot, tgId, chatId, textAnswer = null, callbackData = data)
-                } else if (data.startsWith("focus_")) {
-                    bot.sendMessage(chatId, "Записано! Твой статус активности сохранен.")
+                    SurveyManager.processAnswer(
+                        bot = bot,
+                        tgId = tgId,
+                        chatId = chatId,
+                        textAnswer = null,
+                        callbackData = data,
+                        photoUrl = null,
+                        messageId = messageId
+                    )
                 } else if (data.startsWith("t_stats_")) {
                     val subType = data.removePrefix("t_stats_")
                     val today = LocalDate.now()
@@ -286,6 +296,16 @@ fun main() {
 
         }
     }
+
+    // Регистрация команд в интерфейсе Telegram
+    statBot.setMyCommands(
+        listOf(
+            BotCommand("start", "Запустить бота / главная"),
+            BotCommand("survey", "Пройти опрос вручную"),
+            BotCommand("changegoals", "Изменить свои цели на год и 3 месяца"),
+            BotCommand("teacher", "Панель управления преподавателя")
+        )
+    )
 
     SchedulerService.start(statBot)
 
