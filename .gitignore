@@ -43,3 +43,8 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+### Secrets / local data ###
+local.properties
+*.db-journal
+*.db-wal
+*.db-shm

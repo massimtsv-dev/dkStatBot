@@ -1,323 +1,88 @@
 package com.statbot.bot
 
-import com.github.kotlintelegrambot.bot
-import com.github.kotlintelegrambot.dispatch
-import com.github.kotlintelegrambot.dispatcher.callbackQuery
-import com.github.kotlintelegrambot.dispatcher.command
-import com.github.kotlintelegrambot.dispatcher.photos
-import com.github.kotlintelegrambot.dispatcher.text
-import com.github.kotlintelegrambot.dispatcher.voice
-import com.github.kotlintelegrambot.entities.BotCommand
-import com.github.kotlintelegrambot.entities.ChatId
-import com.github.kotlintelegrambot.entities.InlineKeyboardMarkup
-import com.github.kotlintelegrambot.entities.keyboard.InlineKeyboardButton
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.select
-import org.jetbrains.exposed.sql.update
-import org.jetbrains.exposed.sql.transactions.transaction
-import java.io.File
-import java.time.LocalDate
-import java.util.Properties
-
-import com.statbot.db.DbRepository
-import com.statbot.db.Users
-import com.statbot.model.SurveyManager
+import com.statbot.ai.OpenAiClient
+import com.statbot.ai.PlanAssistant
+import com.statbot.ai.ReportAnalyst
+import com.statbot.config.AppConfig
+import com.statbot.db.Repository
 import com.statbot.notifications.SchedulerService
+import com.statbot.survey.SessionStore
+import com.statbot.survey.SurveyEngine
+import com.statbot.telegram.TelegramClient
+import com.statbot.telegram.TgUser
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
+import org.slf4j.LoggerFactory
 
-object BotDispatcher {
-    var teacherIds = listOf<Long>()
+private val log = LoggerFactory.getLogger("Main")
 
-    fun notifyTeachers(bot: com.github.kotlintelegrambot.Bot, message: String) {
-        teacherIds.forEach { bot.sendMessage(ChatId.fromId(it), message) }
-    }
-}
+private const val DESCRIPTION = """📅 Помогает планировать неделю
+Определяет основные задачи и цели на ближайшую неделю.
 
-fun extractTelegramProperty(obj: Any?, targetProp: String): String? {
-    if (obj == null) return null
-    val queue = ArrayDeque<Any>()
-    queue.add(obj)
-    val visited = mutableSetOf<Int>()
-    while (queue.isNotEmpty()) {
-        val current = queue.removeFirst()
-        val id = System.identityHashCode(current)
-        if (id in visited) continue
-        visited.add(id)
-        val cls = current.javaClass
-        if (cls.name.startsWith("java.lang.") || cls.name.startsWith("android.")) continue
-        try {
-            for (method in cls.methods) {
-                if (method.parameterCount == 0) {
-                    val name = method.name.lowercase()
-                    if (targetProp == "path" && (name == "getfilepath" || name == "filepath" || name == "getpath" || name == "path")) {
-                        val res = method.invoke(current) as? String
-                        if (!res.isNullOrEmpty()) return res
-                    }
-                    if (targetProp == "username" && (name == "getusername" || name == "username")) {
-                        val res = method.invoke(current) as? String
-                        if (!res.isNullOrEmpty()) return res
-                    }
-                }
-            }
-            for (method in cls.methods) {
-                if (method.parameterCount == 0 && method.name != "getClass" && method.name != "hashCode" && method.name != "toString") {
-                    val name = method.name.lowercase()
-                    if (name == "body" || name == "getvalue" || name == "getfirst" || name == "getsecond" || name == "component1" || name == "component2" || name == "getok") {
-                        val inner = method.invoke(current)
-                        if (inner != null) queue.add(inner)
-                    }
-                }
-            }
-        } catch (_: Exception) {}
-    }
-    return null
-}
+💬 Задаёт вопросы для обратной связи
+Периодически спрашивает о работе, результатах и возникающих сложностях.
 
-fun sendTeacherMenu(bot: com.github.kotlintelegrambot.Bot, chatId: ChatId) {
-    val markup = InlineKeyboardMarkup.create(
-        listOf(
-            listOf(InlineKeyboardButton.CallbackData("📊 Дневная статистика", "t_stats_day")),
-            listOf(InlineKeyboardButton.CallbackData("📅 Недельная статистика", "t_stats_week")),
-            listOf(InlineKeyboardButton.CallbackData("🗓 Месячная статистика", "t_stats_month")),
-            listOf(InlineKeyboardButton.CallbackData("👥 Статистика по ученикам", "t_stats_students")),
-            listOf(InlineKeyboardButton.CallbackData("🚨 Последние 5 AI алертов", "t_stats_ai"))
-        )
+На открытые вопросы отвечай удобным способом: текстом или голосовым сообщением. Если предложены варианты ответа — просто выбери подходящий."""
+
+private const val SHORT_DESCRIPTION = "Личный помощник DK FILMS: план недели и регулярная обратная связь."
+
+fun main() = runBlocking {
+    val config = AppConfig.load()
+    val repo = Repository(config.dbPath)
+    val tg = TelegramClient(config.botToken, config.telegramApiUrl)
+    val ai = OpenAiClient(config)
+    if (!ai.enabled) log.warn("OPENAI_API_KEY не задан: план будет разбираться без ИИ, голосовые и ИИ-анализ отключены")
+
+    val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e -> log.error("Необработанная ошибка", e) }
     )
-    bot.sendMessage(chatId, "🎛 Панель управления преподавателя\nВыберите интересующий формат аналитики:", replyMarkup = markup)
-}
 
-fun main() {
-    DbRepository.initDb()
+    val store = SessionStore(repo).also { it.load() }
+    val engine = SurveyEngine(
+        tg = tg,
+        repo = repo,
+        store = store,
+        planner = PlanAssistant(ai),
+        analyst = ReportAnalyst(ai, config.openAiAnalysisModel),
+        config = config,
+        scope = scope,
+        aiEnabled = ai.enabled,
+    )
+    val teacher = TeacherPanel(tg, repo, config.zone)
 
-    val botToken = System.getenv("BOT_TOKEN") ?: Properties().apply {
-        val file = File("local.properties")
-        if (file.exists()) load(file.inputStream())
-    }.getProperty("BOT_TOKEN") ?: error("Токен бота не найден в local.properties!")
-
-    transaction {
-        BotDispatcher.teacherIds = Users.select { Users.role eq "TEACHER" }.map { it[Users.tgId] }
-    }
-
-    val statBot = bot {
-        token = botToken
-
-        dispatch {
-            command("start") {
-                val tgId = message.from?.id ?: return@command
-                val username = message.from?.username
-                val chatId = ChatId.fromId(message.chat.id)
-
-                val userRole = transaction {
-                    val userRow = Users.select { Users.tgId eq tgId }.singleOrNull()
-                    if (userRow == null) {
-                        Users.insert {
-                            it[Users.tgId] = tgId
-                            it[Users.role] = "STUDENT"
-                            it[Users.username] = username
-                        }
-                        "STUDENT"
-                    } else {
-                        if (!username.isNullOrBlank()) {
-                            Users.update({ Users.tgId eq tgId }) { it[Users.username] = username }
-                        }
-                        userRow[Users.role]
-                    }
-                }
-
-                if (userRole == "TEACHER") {
-                    sendTeacherMenu(bot, chatId)
-                } else {
-                    SurveyManager.startSurvey(bot, tgId, chatId)
-                }
-            }
-
-            command("teacher") {
-                val tgId = message.from?.id ?: return@command
-                val chatId = ChatId.fromId(message.chat.id)
-                val userRole = transaction { Users.select { Users.tgId eq tgId }.singleOrNull()?.get(Users.role) }
-
-                if (userRole == "TEACHER") {
-                    sendTeacherMenu(bot, chatId)
-                } else {
-                    bot.sendMessage(chatId, "❌ У вас нет прав доступа к панели управления.")
-                }
-            }
-
-            command("iamteacher") {
-                val tgId = message.from?.id ?: return@command
-                val chatId = ChatId.fromId(message.chat.id)
-                val password = args.firstOrNull()
-
-                if (password == "SuperStat2026") {
-                    transaction {
-                        Users.update({ Users.tgId eq tgId }) { it[Users.role] = "TEACHER" }
-                        BotDispatcher.teacherIds = Users.select { Users.role eq "TEACHER" }.map { it[Users.tgId] }
-                    }
-                    bot.sendMessage(chatId, "✅ Роль ПРЕПОДАВАТЕЛЯ успешно получена! Команда /teacher для входа в меню.")
-                } else {
-                    bot.sendMessage(chatId, "❌ Неверный ключ авторизации.")
-                }
-            }
-
-            command("survey") {
-                val tgId = message.from?.id ?: return@command
-                SurveyManager.startSurvey(bot, tgId, ChatId.fromId(message.chat.id))
-            }
-
-            command("changegoals") {
-                val tgId = message.from?.id ?: return@command
-                val chatId = ChatId.fromId(message.chat.id)
-                val userRole = transaction { Users.select { Users.tgId eq tgId }.singleOrNull()?.get(Users.role) }
-
-                if (userRole == "STUDENT") {
-                    SurveyManager.startGoalUpdate(bot, tgId, chatId)
-                } else {
-                    bot.sendMessage(chatId, "❌ Эта команда доступна только ученикам.")
-                }
-            }
-
-            text {
-                val tgId = message.from?.id ?: return@text
-                val chatId = ChatId.fromId(message.chat.id)
-                if (message.text?.startsWith("/") == true) return@text
-
-                SurveyManager.processAnswer(bot, tgId, chatId, textAnswer = message.text, callbackData = null)
-            }
-
-            callbackQuery {
-                val tgId = callbackQuery.from.id
-                val chatId = ChatId.fromId(callbackQuery.message?.chat?.id ?: return@callbackQuery)
-                val messageId = callbackQuery.message?.messageId
-                val data = callbackQuery.data
-
-                bot.answerCallbackQuery(callbackQuery.id)
-
-                if (data.startsWith("ans_")) {
-                    SurveyManager.processAnswer(
-                        bot = bot,
-                        tgId = tgId,
-                        chatId = chatId,
-                        textAnswer = null,
-                        callbackData = data,
-                        photoUrl = null,
-                        messageId = messageId
-                    )
-                } else if (data.startsWith("t_stats_")) {
-                    val subType = data.removePrefix("t_stats_")
-                    val today = LocalDate.now()
-
-                    when (subType) {
-                        "day" -> {
-                            val res = DbRepository.getPeriodStats(today)
-                            bot.sendMessage(chatId, "📊 Статистика за сегодня ($today):\n\n$res")
-                        }
-                        "week" -> {
-                            val res = DbRepository.getPeriodStats(today.minusDays(7))
-                            bot.sendMessage(chatId, "📅 Статистика за последние 7 дней:\n\n$res")
-                        }
-                        "month" -> {
-                            val res = DbRepository.getPeriodStats(today.minusMonths(1))
-                            bot.sendMessage(chatId, "🗓 Статистика за последние 30 дней:\n\n$res")
-                        }
-                        "ai" -> {
-                            val alerts = DbRepository.getLast5AiAlerts()
-                            if (alerts.isEmpty()) {
-                                bot.sendMessage(chatId, "✅ Критических отклонений от ИИ за последнее время не зафиксировано.")
-                            } else {
-                                val text = alerts.joinToString("\n\n-----------------------------------\n\n")
-                                bot.sendMessage(chatId, "🚨 Последние 5 алертов:\n\n$text")
-                            }
-                        }
-                        "students" -> {
-                            val students = DbRepository.getAllStudents()
-                            if (students.isEmpty()) {
-                                bot.sendMessage(chatId, "👥 В базе данных пока нет зарегистрированных учеников.")
-                            } else {
-                                val buttons = students.map { (id, name) ->
-                                    listOf(InlineKeyboardButton.CallbackData(name, "t_select_student_$id"))
-                                }
-                                bot.sendMessage(chatId, "👥 Выберите ученика из списка:", replyMarkup = InlineKeyboardMarkup.create(buttons))
-                            }
-                        }
-                    }
-                } else if (data.startsWith("t_select_student_")) {
-                    val studentId = data.removePrefix("t_select_student_").toLongOrNull()
-                    if (studentId != null) {
-                        val stats = DbRepository.getStudentStats(studentId)
-                        bot.sendMessage(chatId, stats)
-                    }
-                }
-            }
-
-            photos {
-                val tgId = message.from?.id ?: return@photos
-                val chatId = ChatId.fromId(message.chat.id)
-                val photo = message.photo?.lastOrNull() ?: return@photos
-
-                val fileResult = bot.getFile(photo.fileId)
-                val filePath = extractTelegramProperty(fileResult, "path")
-
-                if (filePath != null) {
-                    val fileUrl = "https://api.telegram.org/file/bot$botToken/$filePath"
-                    SurveyManager.processAnswer(bot, tgId, chatId, textAnswer = null, callbackData = null, photoUrl = fileUrl)
-                } else {
-                    bot.sendMessage(chatId, "❌ Не удалось получить файл скриншота.")
-                }
-            }
-
-            voice {
-                val tgId = message.from?.id ?: return@voice
-                val chatId = ChatId.fromId(message.chat.id)
-                val voiceObj = message.voice ?: return@voice
-
-                bot.sendMessage(chatId, "🎤 Распознаю голосовое сообщение...")
-
-                val fileResult = bot.getFile(voiceObj.fileId)
-                val filePath = extractTelegramProperty(fileResult, "path")
-
-                if (filePath != null) {
-                    val fileUrl = "https://api.telegram.org/file/bot$botToken/$filePath"
-
-                    Thread {
-                        val apiKey = System.getenv("OPENAI_API_KEY") ?: Properties().apply {
-                            val file = File("local.properties")
-                            if (file.exists()) load(file.inputStream())
-                        }.getProperty("OPENAI_API_KEY") ?: ""
-
-                        val openai = com.statbot.ai.OpenAiService(apiKey)
-                        val recognizedText = openai.transcribeVoice(fileUrl)
-
-                        bot.sendMessage(chatId, "🗣 **Расшифровка:** \"$recognizedText\"")
-                        SurveyManager.processAnswer(bot, tgId, chatId, textAnswer = recognizedText, callbackData = null)
-                    }.start()
-                } else {
-                    bot.sendMessage(chatId, "❌ Не удалось прочитать голосовое сообщение.")
-                }
-            }
-
+    // Проверяем токен (с повтором, если сеть ещё не поднялась)
+    var me: TgUser? = null
+    for (attempt in 1..5) {
+        try {
+            me = tg.getMe()
+            break
+        } catch (e: Exception) {
+            if (attempt == 5) throw IllegalStateException("Не удалось подключиться к Telegram: ${e.message}", e)
+            log.warn("Telegram недоступен ({}), повтор через 5 c", e.message)
+            delay(5000)
         }
     }
 
-    // Регистрация команд в интерфейсе Telegram
-    statBot.setMyCommands(
-        listOf(
-            BotCommand("start", "Запустить бота / главная"),
-            BotCommand("survey", "Пройти опрос вручную"),
-            BotCommand("changegoals", "Изменить свои цели на год и 3 месяца"),
-            BotCommand("teacher", "Панель управления преподавателя")
-        )
+    tg.setMyDescription(DESCRIPTION, SHORT_DESCRIPTION)
+    tg.setMyCommands(
+        buildList {
+            add("start" to "Запустить бота / главное меню")
+            add("profile" to "👤 Мой профиль")
+            add("survey" to "Пройти сегодняшний опрос")
+            add("teacher" to "Панель преподавателя")
+            if (config.testCommandsEnabled) add("test" to "🧪 Тестовые сценарии")
+        }
     )
 
-    SchedulerService.start(statBot)
+    SchedulerService(engine, repo, config.zone, scope).start()
 
-    val meResult = statBot.getMe()
-    val username = extractTelegramProperty(meResult, "username")
-    println("====================================================")
-    if (username != null) {
-        println("БОТ СБОРА СТАТИСТИКИ ЗАПУЩЕН: @$username")
-    } else {
-        println("БОТ СБОРА СТАТИСТИКИ ЗАПУЩЕН")
-    }
-    println("====================================================")
+    log.info("====================================================")
+    log.info("БОТ СБОРА СТАТИСТИКИ ЗАПУЩЕН: @{}", me?.username)
+    log.info("====================================================")
 
-    statBot.startPolling()
+    BotApp(tg, engine, repo, ai, teacher, config, scope).runPolling()
 }

@@ -1,0 +1,25 @@
+# Шаблон файла конфигурации. Секреты в репозиторий не попадают.
+# Бот читает файл из CONFIG_PATH (например, CONFIG_PATH=/etc/dkstatbot/bot.properties),
+# а если переменная не задана — local.properties в рабочей папке (он в .gitignore).
+# Любой параметр можно задать и переменной окружения с тем же именем — она важнее файла.
+
+# Обязательно
+BOT_TOKEN=123456:ABC...
+
+# ИИ (без ключа бот работает, но план разбирается построчно, а голосовые и анализ отключены)
+OPENAI_API_KEY=sk-...
+# OPENAI_BASE_URL=https://api.openai.com/v1      # можно указать прокси/совместимый сервис
+# OPENAI_MODEL=gpt-4o-mini                       # модель для плана недели
+# OPENAI_ANALYSIS_MODEL=gpt-4o                   # модель для анализа ответов
+# OPENAI_TRANSCRIBE_MODEL=whisper-1              # распознавание голосовых
+
+# Ключ для команды /iamteacher <ключ>. Если не задан — команда отключена.
+TEACHER_PASSWORD=придумай-свой-ключ
+
+# Необязательно
+# DB_PATH=statbot.db
+# TIMEZONE=Europe/Moscow
+# FEEDBACK_CONTACT=@ninafns
+# PLAN_REMINDER_MINUTES=60
+# TEST_COMMANDS=true          # false — отключить /test_* на проде
+# DEBUG_DATE=2026-11-02       # ТОЛЬКО для отладки: подменяет «сегодня»
